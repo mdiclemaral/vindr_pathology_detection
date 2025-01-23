@@ -7,6 +7,7 @@ import torch
 import torchvision.transforms as transforms
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Tuple, Optional
+from sklearn.model_selection import train_test_split
 
 from PIL import Image
 import numpy as np
@@ -42,9 +43,9 @@ def load_dicom(dicom_path: str) -> Optional[np.ndarray]:
         image_id = dicom_path.split("/")[-1].split(".")[0]
         dicom = pydicom.dcmread(dicom_path)
         image_array = dicom.pixel_array
-        image = Image.fromarray(image_array)
-        image.save(f"im_jpg/{image_id}.jpg")
-        return image
+        # image = Image.fromarray(image_array)
+        # image.save(f"im_jpg/{image_id}.jpg")
+        return image_array
     return None
 
 def get_image_dicom(vindr_folder: str, annotations: pd.DataFrame) -> Dict[str, Optional[np.ndarray]]:
@@ -59,12 +60,56 @@ def get_image_dicom(vindr_folder: str, annotations: pd.DataFrame) -> Dict[str, O
 
     return dicom_dict
 
-def split_train_test(annotations: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Splits the annotations into train and test sets based on the 'split' column."""
+# def split_train_test(annotations: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+#     """Splits the annotations into train and test sets based on the 'split' column."""
+#     train_df = annotations[annotations['split'] == 'training']
+#     test_df = annotations[annotations['split'] == 'test']
+#     return train_df, test_df
+
+def balance_val_set(test_df: pd.DataFrame, val_size: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the test set into validation and reduced test sets while balancing based on `finding_categories`.
+
+    Parameters:
+    - test_df: DataFrame containing test set samples.
+    - val_size: Proportion of test data to allocate to the validation set.
+
+    Returns:
+    - val_df: Balanced validation set.
+    - test_df: Reduced test set after moving samples to validation.
+    """
+    # Expand finding categories into separate rows to ensure balance
+    exploded_test_df = test_df.assign(finding_categories=test_df['finding_categories'].str.split(',')).explode('finding_categories')
+    
+    # Stratified split based on finding_categories
+    val_indices, test_indices = train_test_split(
+        exploded_test_df.index, stratify=exploded_test_df['finding_categories'], test_size=1 - val_size
+    )
+
+    val_df = test_df.loc[val_indices].drop_duplicates()
+    test_df = test_df.loc[test_indices].drop_duplicates()
+    
+    return val_df, test_df
+
+def split_train_val_test(annotations: pd.DataFrame, val_size: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the annotations into train, validation, and test sets.
+    
+    Parameters:
+    - annotations: DataFrame containing annotations with a 'split' column.
+    - val_size: Proportion of test data to allocate to the validation set.
+
+    Returns:
+    - train_df: Training set.
+    - val_df: Validation set.
+    - test_df: Reduced test set.
+    """
     train_df = annotations[annotations['split'] == 'training']
     test_df = annotations[annotations['split'] == 'test']
-    return train_df, test_df
+    
+    val_df, test_df = balance_val_set(test_df, val_size)
 
+    return train_df, val_df, test_df
 def prepare_training_data(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict) -> List[Tuple[str, List[float], List[str], int, int]]:
     """Prepares training data with image_id, bounding box coordinates, pathology labels, image height, and width."""
     training_data = {}
@@ -83,7 +128,24 @@ def prepare_training_data(annotations: pd.DataFrame, metadata: pd.DataFrame, dic
     
     return training_data
 
-def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict, output_dir: str, output_name: str) -> None:
+def write_yaml(labels: List[str], output_file: str, output_dir: str) -> None:
+
+    """Writes the labels to a YAML file."""
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_file, "w") as f:
+
+        f.write("names:\n")
+        for label in labels:
+            f.write(f"  - {label}\n")
+        f.write(f"nc:\n")
+        f.write(f"  - {len(labels)}\n")
+        f.write(f"test: {output_dir}/test/images\n")
+        f.write(f"train: {output_dir}/train/images\n")
+        f.write(f"val: {output_dir}/val/images\n")
+
+        
+
+def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict, output_d: str, output_name: str) -> None:
     """Prepares training data with image_id, bounding box coordinates, pathology labels, image height, and width."""
     training_data = {}
     metadata_dict = metadata.set_index('image_id').to_dict(orient='index')
@@ -91,15 +153,16 @@ def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame
     label_mapping = {}
     label_id = 0
     
-
+    output_dir = os.path.join(output_d,  output_name, "labels")
+    print(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    output_file = os.path.join(output_dir, output_name) 
-
-    with open(output_file, "w") as f:
         
-        for _, row in annotations.iterrows():
-            image_id = row['image_id']
+    for _, row in annotations.iterrows():
+        image_id = row['image_id']
+        output_file = os.path.join(output_dir, f"{image_id}.txt")
+
+        with open(output_file, "w") as f:
             # if image_id in dicom_dict:
             xmin, ymin, xmax, ymax = row['xmin'], row['ymin'], row['xmax'], row['ymax']
             labels = eval(row['finding_categories']) if isinstance(row['finding_categories'], str) else []
@@ -118,10 +181,11 @@ def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame
                 class_id = label_mapping[label]
                 f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
 
-        label_map_file = os.path.join(output_dir, "label_map.txt")
-        with open(label_map_file, "w") as f:
-            for label, class_id in label_mapping.items():
-                f.write(f"{label} {class_id}\n")
+    label_map_file = os.path.join(output_dir, "label_map.txt")
+    write_yaml(list(label_mapping.keys()), os.path.join(output_d, "data.yaml"), output_d)   
+    with open(label_map_file, "w") as f:
+        for label, class_id in label_mapping.items():
+            f.write(f"{label} {class_id}\n")
             
     
 # Example usage
@@ -130,11 +194,13 @@ annotations_csv = os.path.join(vindr_folder, "1.0.0", "finding_annotations.csv")
 breast_annotations_csv = os.path.join(vindr_folder, "1.0.0", "breast-level_annotations.csv")
 annotations_df = read_annotations(annotations_csv)
 breast_annotations_df = read_breast_level_annotations(breast_annotations_csv)
-train_df, test_df = split_train_test(annotations_df)
+train_df, val_df, test_df = split_train_val_test(annotations_df)
 dicom_data_train = get_image_dicom(vindr_folder, train_df)
 dicom_data_test = get_image_dicom(vindr_folder, test_df)
-train_data = prepare_training_data_yolo(train_df, breast_annotations_df, dicom_data_train, "data_yolo", "train.txt")
-test_data = prepare_training_data_yolo(test_df, breast_annotations_df, dicom_data_test, "data_yolo", "test.txt")
+dicom_data_val = get_image_dicom(vindr_folder, val_df)
+train_data = prepare_training_data_yolo(train_df, breast_annotations_df, dicom_data_train, "data_yolo", "train")
+test_data = prepare_training_data_yolo(test_df, breast_annotations_df, dicom_data_test, "data_yolo", "test")
+val_data = prepare_training_data_yolo(val_df, breast_annotations_df, dicom_data_val, "data_yolo", "val")
 
 # print(dicom_data_train)
 # print(test_data)
