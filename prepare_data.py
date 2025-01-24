@@ -12,6 +12,8 @@ from sklearn.model_selection import train_test_split
 from PIL import Image
 import numpy as np
 
+label_mapping = {}
+
 def read_annotations(csv_path: str) -> pd.DataFrame:
     """Reads the finding_annotations.csv file."""
     df = pd.read_csv(csv_path)
@@ -86,17 +88,15 @@ def expand_labels(annotations: pd.DataFrame) -> pd.DataFrame:
 
     return annotations
 
-def split_train_val_test(annotations: pd.DataFrame, val_size: float = 0.01) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def split_train_test(annotations: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Splits the annotations into train, validation, and test sets while balancing labels in validation and test sets.
 
     Parameters:
     - annotations: DataFrame containing annotations with a 'split' column.
-    - val_size: Proportion of test data to allocate to the validation set.
 
     Returns:
     - train_df: Training set.
-    - val_df: Validation set with balanced labels.
     - test_df: Reduced test set with balanced labels.
     """
     # Expand labels before splitting
@@ -106,6 +106,20 @@ def split_train_val_test(annotations: pd.DataFrame, val_size: float = 0.01) -> T
     train_df = annotations[annotations['split'] == 'training']
     test_df = annotations[annotations['split'] == 'test']
 
+    return train_df, test_df
+
+def split_train_val(train_df: pd.DataFrame, val_size: float = 0.01) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the annotations into train and validation sets while balancing labels in the validation set.
+
+    Parameters:
+    - train_df: DataFrame containing training annotations.
+    - val_size: Proportion of test data to allocate to the validation set.
+
+    Returns:
+    - train_df: Training set.
+    - val_df: Validation set with balanced labels.
+    """
 
     # Stratify test_df to create balanced validation and test sets
     if not train_df.empty:
@@ -118,24 +132,7 @@ def split_train_val_test(annotations: pd.DataFrame, val_size: float = 0.01) -> T
     else:
         val_df = pd.DataFrame()  # Empty if no test data
 
-    return train_df, val_df, test_df
-
-def prepare_training_data(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict) -> List[Tuple[str, List[float], List[str], int, int]]:
-    """Prepares training data with image_id, bounding box coordinates, pathology labels, image height, and width."""
-    training_data = {}
-    metadata_dict = metadata.set_index('image_id').to_dict(orient='index')
-    for _, row in annotations.iterrows():
-        image_id = row['image_id']
-        if image_id in dicom_dict:
-            bbox = [row['xmin'], row['ymin'], row['xmax'], row['ymax']]
-            labels = row['finding_categories'] if isinstance(row['finding_categories'], str) else None
-            birads = row['breast_birads'].split(' ')[-1] if isinstance(row['breast_birads'], str) else 0
-            height = metadata_dict.get(image_id, {}).get('height', 0)
-            width = metadata_dict.get(image_id, {}).get('width', 0)
-
-            training_data[image_id] = [bbox, labels, birads, (height, width)]
-
-    return training_data
+    return train_df, val_df
 
 def write_yaml(labels: List[str], output_file: str, output_dir: str) -> None:
 
@@ -153,18 +150,16 @@ def write_yaml(labels: List[str], output_file: str, output_dir: str) -> None:
         f.write(f"val: {output_dir}/val/images\n")
 
         
-def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict, output_d: str, set_name: str) -> None:
+def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame, dicom_dict: dict, output_d: str, set_name: str) -> pd.DataFrame:  
     """Prepares training data with image_id, bounding box coordinates, pathology labels, image height, and width."""
-    training_data = {}
-    metadata_dict = metadata.set_index('image_id').to_dict(orient='index')
 
-    label_mapping = {}
+    metadata_dict = metadata.set_index('image_id').to_dict(orient='index')
     label_id = 0
+
     
     output_dir = os.path.join(output_d,  set_name, "labels")
     os.makedirs(output_dir, exist_ok=True)
 
-        
     for _, row in annotations.iterrows():
         image_id = row['image_id']
         output_file = os.path.join(output_dir, f"{image_id}.txt")
@@ -187,8 +182,13 @@ def prepare_training_data_yolo(annotations: pd.DataFrame, metadata: pd.DataFrame
                     label_id += 1
                 class_id = label_mapping[label]
                 f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
+        
+    write_yaml(list(label_mapping.keys()), os.path.join(output_d, "data.yaml"), output_d)
 
-    write_yaml(list(label_mapping.keys()), os.path.join(output_d, "data.yaml"), output_d)   
+    # Filter annotations to only keep rows where image_id exists in dicom_dict
+    filtered_annotations = annotations[annotations['image_id'].isin(dicom_dict)]
+    return filtered_annotations
+
 
     
 # Example usage
@@ -201,12 +201,14 @@ breast_annotations_csv = os.path.join(vindr_folder, "1.0.0", "breast-level_annot
 annotations_df = read_annotations(annotations_csv)
 breast_annotations_df = read_breast_level_annotations(breast_annotations_csv)
 
-train_df, val_df, test_df = split_train_val_test(annotations_df)
+train_df, test_df = split_train_test(annotations_df)
 
 dicom_data_train = get_image_dicom(vindr_folder, train_df,new_dataset_path, "train")
-dicom_data_test = get_image_dicom(vindr_folder, test_df,new_dataset_path, "test")
-dicom_data_val = get_image_dicom(vindr_folder, val_df,new_dataset_path, "val")
+train_df= prepare_training_data_yolo(train_df, breast_annotations_df, dicom_data_train, new_dataset_path, "train")
+train_df, val_df = split_train_val(train_df)
 
-train_data = prepare_training_data_yolo(train_df, breast_annotations_df, dicom_data_train, new_dataset_path, "train")
-test_data = prepare_training_data_yolo(test_df, breast_annotations_df, dicom_data_test, new_dataset_path, "test")
-val_data = prepare_training_data_yolo(val_df, breast_annotations_df, dicom_data_val, new_dataset_path, "val")
+dicom_data_test = get_image_dicom(vindr_folder, test_df,new_dataset_path, "test")
+test_df = prepare_training_data_yolo(test_df, breast_annotations_df, dicom_data_test, new_dataset_path, "test")
+
+dicom_data_val = get_image_dicom(vindr_folder, val_df,new_dataset_path, "val")
+val_df = prepare_training_data_yolo(val_df, breast_annotations_df, dicom_data_val, new_dataset_path, "val")
