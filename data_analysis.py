@@ -1,41 +1,66 @@
-from collections import Counter
+import pandas as pd
+import matplotlib.pyplot as plt
+import ast
+import os
 
-def analyze_birads_and_findings(df: pd.DataFrame):
-    """
-    Analyze the dataset for BI-RADS score distribution and finding categories.
+# Load the datasets
+breast_annotations_path = "vindr/1.0.0/breast-level_annotations.csv"
+finding_annotations_path = "vindr/1.0.0/finding_annotations.csv"
 
-    Args:
-        df (pd.DataFrame): DataFrame containing 'breast_birads' and 'finding_categories' columns.
+os.makedirs("data_analysis", exist_ok=True)
 
-    Returns:
-        Tuple of dictionaries: (birads_counts, finding_category_counts)
-    """
-    # Count occurrences of each BI-RADS score
-    birads_counts = df['breast_birads'].value_counts().to_dict()
+breast_annotations_df = pd.read_csv(breast_annotations_path)
+finding_annotations_df = pd.read_csv(finding_annotations_path)
 
-    # Process finding categories: Remove brackets, split on commas, and count occurrences
-    all_findings = []
-    for entry in df['finding_categories']:
-        # Convert string list format to an actual list of categories
-        cleaned_entry = entry.replace("[", "").replace("]", "").replace("'", "").strip()
-        categories = [cat.strip() for cat in cleaned_entry.split(",") if cat.strip()]
-        all_findings.extend(categories)
+def plot_distribution(df, column, title):
+    """Plots a bar chart showing the distribution of values in a column with actual counts on bars."""
+    value_counts = df[column].value_counts()
+    
+    plt.figure(figsize=(8, 9))
+    ax = value_counts.plot(kind="bar", color="skyblue", edgecolor="black")
+    plt.xlabel(column)
+    plt.ylabel("Count")
+    plt.title(title)
+    plt.xticks(rotation=45, ha="right")
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    
+    # Add text annotations
+    for p in ax.patches:
+        ax.annotate(str(p.get_height()), (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.savefig(f"data_analysis/{column}_distribution.png")
 
-    # Count occurrences of each finding category
-    finding_category_counts = dict(Counter(all_findings))
+def analyze_data_balances(breast_df, finding_df):
+    """Analyzes and plots the distributions of breast_birads, breast_density, and finding_categories."""
+    
+    # Finding BIRADS distribution
+    plot_distribution(finding_df, "breast_birads", "Finding BIRADS Distribution") #
+    
+    # Breast Density in Finding dataset
+    plot_distribution(finding_df, "breast_density", "Breast Density Distribution in Findings") #
 
-    return birads_counts, finding_category_counts
+    # Finding Categories distribution
+    finding_categories_flattened = []
+    for row in finding_df["finding_categories"].dropna():
+        categories = ast.literal_eval(row)  # Convert string list to actual list
+        finding_categories_flattened.extend(categories)
 
-# Run the function on the dataset
-birads_counts, finding_category_counts = analyze_birads_and_findings(df)
-
-# Display the results
-import ace_tools as tools
-
-# Convert to DataFrame for better visualization
-birads_df = pd.DataFrame(list(birads_counts.items()), columns=["BI-RADS Score", "Count"])
-findings_df = pd.DataFrame(list(finding_category_counts.items()), columns=["Finding Category", "Count"])
-
-# Show results
-tools.display_dataframe_to_user(name="BI-RADS Distribution", dataframe=birads_df)
-tools.display_dataframe_to_user(name="Finding Categories Distribution", dataframe=findings_df)
+    finding_categories_series = pd.Series(finding_categories_flattened)
+    
+    plt.figure(figsize=(12, 6))
+    ax = finding_categories_series.value_counts().plot(kind="bar", color="coral", edgecolor="black")
+    plt.xlabel("Finding Category")
+    plt.ylabel("Count")
+    plt.title("Finding Categories Distribution")
+    plt.xticks(rotation=45, ha="right")
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    
+    # Add text annotations
+    for p in ax.patches:
+        ax.annotate(str(p.get_height()), (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.savefig("data_analysis/finding_categories_distribution.png")
+# Run the analysis
+analyze_data_balances(breast_annotations_df, finding_annotations_df)
